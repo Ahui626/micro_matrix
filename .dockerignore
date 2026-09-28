@@ -1,0 +1,13 @@
+# 镜像构建时排除：这些要么本机才有，要么在容器里会重新生成。
+.venv/
+__pycache__/
+*.py[cod]
+logs/
+*.log
+.git/
+.gitignore
+.pytest_cache/
+docs/
+labs/
+deploy/
+gen/          # 进容器后用 python scripts/gen_proto.py 重新生成

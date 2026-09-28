@@ -1,0 +1,116 @@
+# [问题]   想在没有 K8s 集群的机器上，把**整个系统**（中间件 + 业务服务）
+#          全部用容器跑起来，验证"容器化之后还能正常工作"。
+# [本文件] 全栈 compose：postgres + redis + 一次性播种 + 三个业务服务。
+# [面试]   - 为什么业务服务之间的地址用的是 compose 服务名（order / inventory），
+#            而不是 localhost？
+#           （每个容器有独立的网络命名空间，localhost 指容器自己。
+#             compose 内建 DNS 把服务名解析成容器 IP —— 这跟 K8s Service 的
+#             DNS 发现是同一套机制，所以这里把 MM_DISCOVERY 设成 static。）
+#         - 为什么 seed 要单独做成一个一次性服务，而不是让业务服务自己播种？
+#           （播种是"有顺序的一次性任务"：必须等 postgres 就绪、只做一次。
+#             用 depends_on: service_completed_successfully 让业务服务等它做完，
+#             这对应 K8s 里的 initContainer / Job。）
+# [取舍]   发现用 static（DNS 式），不用 Consul（注册中心式）。
+#         理由：容器内地址用 0.0.0.0 绑定、用服务名访问，绑定地址和广播地址
+#         天然不同；而 Consul 注册中心式已经在宿主机开发模式（根目录的 compose）
+#         演示过了。两种方式都覆盖到，且各自用在最自然的场景里。
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: micro
+      POSTGRES_PASSWORD: micro
+      POSTGRES_DB: micro_matrix
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U micro -d micro_matrix"]
+      interval: 2s
+      timeout: 1s
+      retries: 30
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 1s
+      retries: 30
+
+  # 一次性播种任务。跑完即退出，业务服务等它成功后才启动。
+  seed:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["scripts/seed.py"]
+    environment:
+      MM_PG_DSN: "postgresql://micro:micro@postgres:5432/micro_matrix"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  inventory:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["services/inventory/main.py"]
+    environment:
+      MM_PG_DSN: "postgresql://micro:micro@postgres:5432/micro_matrix"
+      MM_REDIS_URL: "redis://redis:6379/0"
+      # 绑定 0.0.0.0：容器内监听所有接口，别人才连得进来。
+      # （127.0.0.1 只对容器自己可见，见本文件头部的面试题。）
+      MM_INVENTORY_ADDR: "0.0.0.0:50052"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      seed:
+        condition: service_completed_successfully
+
+  order:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["services/order/main.py"]
+    environment:
+      MM_PG_DSN: "postgresql://micro:micro@postgres:5432/micro_matrix"
+      MM_REDIS_URL: "redis://redis:6379/0"
+      MM_ORDER_ADDR: "0.0.0.0:50051"          # 绑定地址
+      MM_INVENTORY_ADDR: "inventory:50052"     # 目标地址：走 compose DNS
+      MM_WORKER_ID: "2"                        # 和别的实例错开，避免 Snowflake 撞 ID
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      inventory:
+        condition: service_started
+      seed:
+        condition: service_completed_successfully
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["services/gateway/main.py"]
+    environment:
+      MM_PG_DSN: "postgresql://micro:micro@postgres:5432/micro_matrix"
+      MM_REDIS_URL: "redis://redis:6379/0"
+      MM_GATEWAY_HOST: "0.0.0.0"
+      MM_ORDER_ADDR: "order:50051"             # 目标地址：走 compose DNS
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      order:
+        condition: service_started
+
+volumes:
+  pgdata:

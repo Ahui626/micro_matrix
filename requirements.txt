@@ -1,0 +1,27 @@
+# [问题]   固定整套依赖的版本，让"昨天能跑今天挂了"不会发生。
+# [本文件] 全部 pin 到精确版本。protobuf 的运行时版本必须与 grpc 工具链生成的
+#          gencode 兼容 —— 这是本文件最重要的约束，见 docs/6-runbook.md 第 4 条。
+# [面试]   - protobuf 的"运行时版本 vs 生成代码版本"不匹配会报什么错？
+#         - 为什么生产环境要锁死传递依赖？
+# [取舍]   只用 8 个直接依赖。限流、锁、熔断、链路追踪全部手写 —— 既避开
+#          依赖地狱，也让这些机制本身成为可读的教材（见 common/）。
+
+# --- gRPC 三件套：版本必须一起动 ---
+# grpcio-tools 1.84.0 声明 protobuf>=7.35.1,<8.0.0，所以 protobuf 锁 7.36.1
+grpcio==1.84.0
+grpcio-tools==1.84.0
+grpcio-health-checking==1.84.0
+protobuf==7.36.1
+
+# --- HTTP 边缘 ---
+fastapi==0.141.1
+uvicorn==0.53.0
+pydantic==2.13.5
+# httpx 用于 labs/loadgen.py 的并发压测。
+# 为什么不用 ab / hey / wrk：那些在 Windows 上没有或很难装。
+# 用纯 Python 的 asyncio 压测器，跨平台且能被读者看懂每一行。
+httpx==0.28.1
+
+# --- 中间件客户端 ---
+redis==8.1.0
+asyncpg==0.31.0

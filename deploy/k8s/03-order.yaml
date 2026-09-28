@@ -1,0 +1,62 @@
+# order 服务。它既被 gateway 调用（目标地址 order:50051），
+# 又调用 inventory（目标地址 inventory:50052，来自 ConfigMap）。
+# 自己的 MM_ORDER_ADDR 在这里是绑定地址 0.0.0.0:50051。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order
+  namespace: micro-matrix
+  labels:
+    app: order
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: order
+  template:
+    metadata:
+      labels:
+        app: order
+    spec:
+      containers:
+        - name: order
+          image: localhost:5000/micro-matrix:v1   # 本地私有仓库（Docker Desktop K8s 拉不到 docker build 的镜像）
+          imagePullPolicy: Always   # 本地仓库：每次重启都拉最新，改代码重推后不用换 tag
+          command: ["python", "-u", "services/order/main.py"]
+          envFrom:
+            - configMapRef:
+                name: micro-matrix-config
+          env:
+            # 覆盖 ConfigMap：这里是绑定地址。
+            - name: MM_ORDER_ADDR
+              value: "0.0.0.0:50051"
+          ports:
+            - name: grpc
+              containerPort: 50051
+          readinessProbe:
+            exec:
+              command: ["python", "scripts/grpc_probe.py", "127.0.0.1:50051"]
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command: ["python", "scripts/grpc_probe.py", "127.0.0.1:50051"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: order
+  namespace: micro-matrix
+spec:
+  selector:
+    app: order
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: 50051

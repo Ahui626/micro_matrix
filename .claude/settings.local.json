@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(netstat -ano)",
+      "Bash(awk '{print \"  \" $2}')",
+      "Bash(curl -s -m 3 http://127.0.0.1:8000/healthz)",
+      "Bash(./.venv/Scripts/python.exe labs/lab2_dup_consume.py)"
+    ]
+  }
+}

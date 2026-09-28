@@ -1,0 +1,65 @@
+# inventory 服务：Deployment（副本）+ Service（集群内 DNS 发现）。
+# 关键点：MM_INVENTORY_ADDR 在这里是**绑定地址** 0.0.0.0:50052，
+# 覆盖掉 ConfigMap 里的目标地址 inventory:50052（那是给 order 用的）。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory
+  namespace: micro-matrix
+  labels:
+    app: inventory
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: inventory
+  template:
+    metadata:
+      labels:
+        app: inventory
+    spec:
+      containers:
+        - name: inventory
+          image: localhost:5000/micro-matrix:v1   # 本地私有仓库（Docker Desktop K8s 拉不到 docker build 的镜像）
+          imagePullPolicy: Always   # 本地仓库：每次重启都拉最新，改代码重推后不用换 tag
+          command: ["python", "-u", "services/inventory/main.py"]
+          envFrom:
+            - configMapRef:
+                name: micro-matrix-config
+          env:
+            # 覆盖 ConfigMap：这里是绑定地址，不是目标地址。
+            - name: MM_INVENTORY_ADDR
+              value: "0.0.0.0:50052"
+          ports:
+            - name: grpc
+              containerPort: 50052
+          # readiness：能不能接流量。用真正的 gRPC 健康检查（见 scripts/grpc_probe.py）。
+          readinessProbe:
+            exec:
+              command: ["python", "scripts/grpc_probe.py", "127.0.0.1:50052"]
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # liveness：进程是不是死了。同样用 gRPC 健康检查（它不查下游依赖，安全）。
+          livenessProbe:
+            exec:
+              command: ["python", "scripts/grpc_probe.py", "127.0.0.1:50052"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inventory
+  namespace: micro-matrix
+spec:
+  selector:
+    app: inventory
+  ports:
+    - name: grpc
+      port: 50052
+      targetPort: 50052
+  # 不写 type 默认 ClusterIP：只在集群内部可解析到 inventory:50052。

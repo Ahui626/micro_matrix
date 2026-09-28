@@ -1,0 +1,33 @@
+# [问题]   数据库建好表之后，库存表是空的，任何下单都会"库存不足"。
+#          需要先播种 —— 这个"一次性任务"在 K8s 里怎么表达？
+# [本文件] 一个 Job：跑一次 seed 就退出。业务服务里的 init_schema 是幂等的，
+#          seed 的 INSERT ... ON CONFLICT 也是幂等的，所以重复跑也安全。
+# [面试]   - Job 和 Deployment 的区别？
+#           （Deployment 保证"常驻"：Pod 挂了重启、维持副本数。
+#             Job 保证"跑完一次"：任务成功后 Pod 进入 Completed，不再重启。
+#             "播种"是一次性任务，天然是 Job 而不是 Deployment。）
+#         - 怎么保证业务服务在播种完成之后才启动？
+#           （裸 YAML 里没有 compose 的 depends_on。生产环境用 initContainer
+#             或者 Helm 的 hook 来编排顺序。这里为演示保持简单：seed 幂等，
+#             业务服务稍后读到库存即可。见 docs/7-deployment.md。）
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: seed
+  namespace: micro-matrix
+spec:
+  template:
+    metadata:
+      labels:
+        app: seed
+    spec:
+      restartPolicy: Never   # 任务失败不自动重启（区别于 Deployment 的 Always）
+      containers:
+        - name: seed
+          image: localhost:5000/micro-matrix:v1   # 本地私有仓库（Docker Desktop K8s 拉不到 docker build 的镜像）
+          imagePullPolicy: Always   # 本地仓库：每次重启都拉最新，改代码重推后不用换 tag
+          command: ["python", "-u", "scripts/seed.py"]
+          envFrom:
+            - configMapRef:
+                name: micro-matrix-config

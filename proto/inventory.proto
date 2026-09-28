@@ -1,0 +1,78 @@
+// [问题]   定义 inventory 服务的契约：扣库存、回补库存、查库存。
+// [本文件] 三个 unary RPC。重点看 Reserve 和 Release 构成的一对"正向操作 + 补偿操作"。
+// [面试]   - 为什么 Reserve 要带 request_id？（gRPC 重试会让同一个请求到达两次）
+//         - 补偿操作（Release）本身失败了怎么办？补偿是不是也必须幂等？
+//         - "预留库存"和"扣减库存"有什么区别？为什么下单用预留而不是直接扣？
+// [取舍]   Reserve 返回 (ok, reason) 而不是用 gRPC 错误码表达"库存不足"。
+//          库存不足是**业务上的正常结果**，不是异常 —— 用错误码表达会让调用方
+//          很难区分"业务拒绝"和"网络故障"，而这两者的处理方式完全相反：
+//          前者不该重试，后者必须重试。
+
+syntax = "proto3";
+
+package mm.inventory.v1;
+
+service InventoryService {
+  // 预留库存（正向操作）。成功表示这批货已经被锁定，不会卖给其他人。
+  rpc Reserve(ReserveRequest) returns (ReserveResponse);
+
+  // 回补库存（补偿操作）。Saga 里当后续步骤失败时调用它把货放回去。
+  rpc Release(ReleaseRequest) returns (ReleaseResponse);
+
+  // 查询可用库存。
+  rpc GetStock(GetStockRequest) returns (Stock);
+}
+
+message ReserveRequest {
+  // 幂等键，语义同 order.proto。
+  // 为什么这里必须幂等：gRPC 客户端在超时后会重试，而"超时"不代表
+  // "服务端没执行" —— 服务端可能已经扣了库存，只是响应回不来。
+  // 没有幂等保护，重试就会把库存扣两次。
+  string request_id = 1;
+
+  string sku = 2;
+  int32 quantity = 3;
+}
+
+message ReserveResponse {
+  // 业务结果。false 是正常返回，不是错误。
+  bool ok = 1;
+
+  // 预留后剩余的可用库存，便于调用方展示。
+  int32 remaining = 2;
+
+  // 失败原因：OUT_OF_STOCK / SKU_NOT_FOUND / ""（成功时为空）
+  string reason = 3;
+
+  // 预留操作自身产生的幂等键，Release 时原样带回。
+  // 这样"补偿"也能被去重 —— 补偿同样可能被重试。
+  string reservation_id = 4;
+}
+
+message ReleaseRequest {
+  // 释放也要幂等：补偿动作可能因为重试被执行多次。
+  // 如果不幂等，一次失败的订单会把库存加回去两次，凭空多出货来。
+  string request_id = 1;
+
+  string sku = 2;
+  int32 quantity = 3;
+}
+
+message ReleaseResponse {
+  bool ok = 1;
+  int32 remaining = 2;
+}
+
+message GetStockRequest {
+  string sku = 1;
+}
+
+message Stock {
+  string sku = 1;
+  int32 available = 2;
+
+  // 乐观锁版本号。每次库存变更 +1。
+  // 它让"读-改-写"能检测出并发修改：UPDATE ... WHERE version = $expected
+  // 如果 rowcount 是 0，说明期间有人改过，需要重试。
+  int32 version = 3;
+}

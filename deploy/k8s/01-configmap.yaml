@@ -1,0 +1,41 @@
+# [问题]   业务服务上 K8s 之后，Postgres / Redis 这些中间件怎么办？
+# [本文件] 中间件走**外部**（托管实例或已有集群），地址用环境变量注入。
+#          ConfigMap 存"所有 Pod 共享"的配置；每个 Pod 自己不同的部分
+#          （比如绑定地址）在各 Deployment 里覆盖。
+# [面试]   - ConfigMap 和 Secret 的区别？
+#           （都是配置注入，但 Secret 面向敏感数据（密码/令牌），
+#             用 base64 编码 + 可加密存储。这里为了演示把密码放 ConfigMap，
+#             生产环境密码必须放 Secret。）
+#         - 为什么 MM_DISCOVERY=static？
+#           （K8s 的 Service + DNS 已经接管了服务发现，不需要再跑一个 Consul。
+#             见 docs/7-deployment.md 的"注册中心式 vs DNS 式"。）
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: micro-matrix-config
+  namespace: micro-matrix
+data:
+  # 中间件地址：Docker Desktop 下用 host.docker.internal 指向宿主机。
+  # （宿主机上的 mm-postgres / mm-redis 已把 5432 / 6379 发布到宿主机端口）
+  MM_PG_DSN: "postgresql://micro:micro@host.docker.internal:5432/micro_matrix"
+  MM_REDIS_URL: "redis://host.docker.internal:6379/0"
+
+  # 服务发现：K8s 用 Service + DNS，不走 Consul 注册中心。
+  MM_DISCOVERY: "static"
+
+  # ★ 目标地址：gateway → order、order → inventory，用的是 Service 名。
+  #   但注意：order Pod 里的 MM_ORDER_ADDR 会被覆盖成绑定地址 0.0.0.0:50051，
+  #   inventory Pod 里的 MM_INVENTORY_ADDR 会被覆盖成 0.0.0.0:50052。
+  #   同一个变量在不同 Pod 里含义不同 —— 见 docs/7-deployment.md。
+  MM_ORDER_ADDR: "order:50051"
+  MM_INVENTORY_ADDR: "inventory:50052"
+
+  # gateway 必须绑定 0.0.0.0，否则只监听 Pod 内 127.0.0.1，Service 转发进不来。
+  MM_GATEWAY_HOST: "0.0.0.0"
+
+  # 超时预算：Docker Desktop K8s 的 gvisor 网络下，Service 名首次解析+建连
+  # 约 2 秒，默认 1000ms 的 inventory 预算会不够。放宽后首次调用也能成功。
+  # 真实集群里网络更快，可以再收紧。
+  MM_GATEWAY_DEADLINE_MS: "5000"
+  MM_ORDER_RESERVE_TIMEOUT_MS: "3000"

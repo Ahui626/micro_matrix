@@ -1,0 +1,5 @@
+# 所有资源放进同一个 namespace，隔离这个演示项目。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: micro-matrix

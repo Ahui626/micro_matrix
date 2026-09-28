@@ -1,0 +1,64 @@
+# [问题]   整套系统只需要三个中间件：Redis（限流/锁/Streams）、
+#          Postgres（事务与真相）、Consul（服务注册与发现）。
+# [本文件] 把这三个中间件跑起来。业务服务本身跑在宿主机上，不进容器。
+# [面试]   - 为什么宿主机进程能通过 localhost 访问容器？
+#            （Docker Desktop 会把容器端口转发到宿主机；一旦服务也容器化，
+#              就必须改用 compose 服务名，因为那时 localhost 指的是容器自己）
+#         - 健康检查（healthcheck）是做什么的？和 K8s 探针是什么关系？
+#         - Consul 在这里为什么用 TTL 健康检查 + 服务主动心跳，而不是 Consul 主动探活？
+#            （见 common/discovery.py 的取舍说明：心跳天然绕开"探不到容器/宿主机端口"的问题）
+# [取舍]   业务服务不容器化 —— 教学场景下，能在宿主机直接读日志、下断点、
+#          改一行就重启，比"环境一致"重要得多。
+#          Consul 用 -dev 模式：单节点、数据只存内存，足够演示注册发现，
+#          但重启就丢注册表 —— 生产必须多节点 + 持久化。
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: mm-redis
+    ports:
+      - "6379:6379"
+    # appendonly 打开 AOF 持久化：重启容器后数据还在，
+    # 这样"故障恢复"类实验才有意义。
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 1s
+      retries: 30
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: mm-postgres
+    environment:
+      POSTGRES_USER: micro
+      POSTGRES_PASSWORD: micro
+      POSTGRES_DB: micro_matrix
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U micro -d micro_matrix"]
+      interval: 2s
+      timeout: 1s
+      retries: 30
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  consul:
+    image: hashicorp/consul:1.20
+    container_name: mm-consul
+    ports:
+      - "8500:8500"    # HTTP API：注册/发现/健康检查都走这个端口
+      - "8600:8600/udp"  # DNS 接口：consul 还支持用 DNS 做服务发现
+    # -dev：单节点开发模式，数据只存内存。够演示，重启即丢注册表。
+    # -client=0.0.0.0：让宿主机也能访问（默认只监听容器内 127.0.0.1）。
+    command: ["agent", "-dev", "-client=0.0.0.0"]
+    healthcheck:
+      # consul members 能成功说明 agent 起来了、且 Raft 已选出 leader。
+      test: ["CMD", "consul", "members"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+volumes:
+  pgdata:

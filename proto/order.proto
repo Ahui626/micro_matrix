@@ -1,0 +1,81 @@
+// [问题]   定义 order 服务对外的契约：怎么下单、怎么查单。
+// [本文件] 一个 unary RPC + 消息定义。重点看 request_id 字段和字段编号注释。
+// [面试]   - 为什么内部服务通信用 gRPC 而不是 REST/JSON？
+//         - protobuf 的字段编号（=1/2/3）为什么不能随便改？reserved 是干什么的？
+//         - 幂等键应该由客户端生成还是服务端生成？为什么？
+// [取舍]   CreateOrderResponse 里同时返回 order 和一个 deduplicated 标志，
+//          而不是在重复请求时返回错误 —— 幂等的语义是"返回和第一次相同的结果"，
+//          不是"拒绝第二次"。这个区别是面试常问的细节。
+
+syntax = "proto3";
+
+package mm.order.v1;
+
+service OrderService {
+  // 创建订单。这是整个系统的入口，也是幂等、Saga 编排发生的地方。
+  rpc CreateOrder(CreateOrderRequest) returns (CreateOrderResponse);
+
+  // 查询订单（用于演示缓存与读路径）。
+  rpc GetOrder(GetOrderRequest) returns (Order);
+}
+
+message CreateOrderRequest {
+  // 幂等键。由客户端生成，同一个逻辑请求重试时必须携带同一个值。
+  // 服务端据此判断"这是重试"还是"新请求"。
+  //
+  // 注意：调用方（gateway）自己生成它，而不是服务端生成 —— 因为只有
+  // 调用方知道自己"重试了同一个逻辑操作"。这是幂等设计的关键前提。
+  string request_id = 1;
+
+  string user_id = 2;
+  string sku = 3;
+  int32 quantity = 4;
+}
+
+message CreateOrderResponse {
+  Order order = 1;
+
+  // true 表示这次请求命中了幂等表，返回的是之前那次的结果。
+  // 生产环境应该把这件事记录成指标 —— 它能告诉你重试率有多高。
+  bool deduplicated = 2;
+}
+
+message Order {
+  // Snowflake 生成的 64 位 ID，全局唯一且趋势递增。
+  // 为什么不用数据库自增：分库分表后会冲突，且自增 ID 会暴露业务量。
+  int64 id = 1;
+
+  string request_id = 2;
+  string user_id = 3;
+  string sku = 4;
+  int32 quantity = 5;
+
+  // PENDING / CONFIRMED / CANCELLED
+  // 用 string 而不是 enum：枚举加值需要双方同时升级 proto，
+  // 而 string 对未知值天然兼容。小团队里这是更务实的选择。
+  string status = 6;
+
+  int64 created_at_ms = 7;
+}
+
+message GetOrderRequest {
+  int64 id = 1;
+}
+
+// ---------------------------------------------------------------------------
+// 关于字段编号，这里是 protobuf 演进的第一原则：
+//
+//   1. 字段编号（= 后面那个数字）是永久的，绝对不能复用。
+//   2. 删除字段时要用 reserved 标记，防止后人误用同一个编号。
+//   3. 新增字段必须用新编号，并且要能容忍"对方还没有这个字段"。
+//
+// 反例（千万别做）：
+//   message Foo { string a = 1; int32 b = 1; }   // 编号 1 被用了两次
+//
+// 正确做法：
+//   reserved 3, 5;              // 这些编号被废弃了，不许再用
+//   reserved "old_field_name";  // 字段名也一并保留
+//
+// 为什么这么严：protobuf 的线格式（wire format）里只存编号不存字段名。
+// 复用编号会让新旧版本的程序互相解析出错误的数据 —— 而且不报错，静默错乱。
+// ---------------------------------------------------------------------------
